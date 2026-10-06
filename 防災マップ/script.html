@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>現在地 ＋ 避難所マップ</title>
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+  <style>
+    #map {
+      height: 500px;
+      width: 100%;
+      margin-top: 10px;
+    }
+    #table-container {
+      margin-top: 20px;
+      max-height: 300px;
+      overflow-y: auto;
+      border: 1px solid #ccc;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      border: 1px solid #ddd;
+      padding: 8px;
+      text-align: left;
+    }
+    th {
+      background-color: #f2f2f2;
+      position: sticky;
+      top: 0;
+    }
+  </style>
+</head>
+<body>
+
+<button onclick="getLocation()">現在地を取得して避難所を表示</button>
+<p id="result">ボタンを押して現在地を取得してください</p>
+
+<h1>避難所マップ</h1>
+<div id="map"></div>
+
+<!-- CSVデータ表示エリア -->
+<div id="csv-section" style="display: none;">
+  <h2 id="csv-title">読み込んだ避難所一覧（CSVデータ）</h2>
+  <div id="table-container">
+    <table id="shelter-table">
+      <thead>
+        <tr>
+          <th>名称</th>
+          <th>住所</th>
+          <th>緯度</th>
+          <th>経度</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+  // ★読み込みたいCSVファイル名をここに指定します（例: 01000_1.csv や 01000_2.csv）
+  const CSV_FILE_NAME = "01000_1.csv";
+
+  // 地図の初期化
+  const map = L.map("map").setView([35.0, 135.0], 5);
+
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  }).addTo(map);
+
+  const shelterIcon = L.icon({
+    iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
+    shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+    iconSize: [25, 41],
+    iconAnchor: [12, 41],
+    popupAnchor: [1, -34],
+    shadowSize: [41, 41]
+  });
+
+  const shelterLayerGroup = L.layerGroup().addTo(map);
+  let currentMarker = null;
+
+  // CSV分割関数（引用符・カンマ考慮）
+  function parseCSVLine(line) {
+    const values = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      if (char === '"') {
+        inQuotes = !inQuotes;
+      } else if (char === ',' && !inQuotes) {
+        values.push(current.trim().replace(/^"|"$/g, ''));
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    values.push(current.trim().replace(/^"|"$/g, ''));
+    return values;
+  }
+
+  // 柔軟に列（インデックス）を検索する関数
+  function findColumnIndex(headers, keywords) {
+    for (let i = 0; i < headers.length; i++) {
+      const header = headers[i].toLowerCase();
+      for (const kw of keywords) {
+        if (header.includes(kw.toLowerCase())) {
+          return i;
+        }
+      }
+    }
+    return -1;
+  }
+
+  function getLocation() {
+    const resultElement = document.getElementById("result");
+
+    if (!navigator.geolocation) {
+      resultElement.textContent = "このブラウザは位置情報に対応していません。";
+      return;
+    }
+
+    resultElement.textContent = "現在地を取得中...";
+
+    navigator.geolocation.getCurrentPosition(
+      function(position) {
+        const userLat = position.coords.latitude;
+        const userLng = position.coords.longitude;
+
+        resultElement.textContent = `現在地を取得しました (緯度: ${userLat.toFixed(4)}, 経度: ${userLng.toFixed(4)})`;
+
+        map.setView([userLat, userLng], 14);
+
+        if (currentMarker) map.removeLayer(currentMarker);
+        currentMarker = L.marker([userLat, userLng])
+          .addTo(map)
+          .bindPopup("<b>あなたの現在地</b>")
+          .openPopup();
+
+        loadAndDisplayShelterCSV();
+      },
+      function(error) {
+        resultElement.textContent = "現在地を取得できませんでした。";
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  }
+
+  function loadAndDisplayShelterCSV() {
+    fetch(CSV_FILE_NAME)
+      .then(res => {
+        if (!res.ok) throw new Error(`${CSV_FILE_NAME} の読み込みに失敗しました。ファイル名や配置場所を確認してください。`);
+        return res.text();
+      })
+      .then(csvText => {
+        const lines = csvText.trim().split(/\r?\n/);
+        if (lines.length < 2) return;
+
+        const headers = parseCSVLine(lines[0]);
+
+        // キーワードによる強力な列自動特定
+        const nameIdx = findColumnIndex(headers, ["名称", "施設", "避難所", "name"]);
+        const latIdx = findColumnIndex(headers, ["緯度", "lat", "y"]);
+        const lngIdx = findColumnIndex(headers, ["経度", "lng", "lon", "x"]);
+        const addressIdx = findColumnIndex(headers, ["住所", "所在地", "address"]);
+
+        if (latIdx === -1 || lngIdx === -1) {
+          alert(`CSVから緯度・経度の列が見つかりませんでした。\nヘッダー確認: ${headers.join(", ")}`);
+          return;
+        }
+
+        const tableBody = document.querySelector("#shelter-table tbody");
+        tableBody.innerHTML = "";
+        shelterLayerGroup.clearLayers();
+
+        let count = 0;
+
+        for (let i = 1; i < lines.length; i++) {
+          if (!lines[i]) continue;
+          const row = parseCSVLine(lines[i]);
+
+          const lat = parseFloat(row[latIdx]);
+          const lng = parseFloat(row[lngIdx]);
+          const name = (nameIdx !== -1 && row[nameIdx]) ? row[nameIdx] : "避難所";
+          const address = (addressIdx !== -1 && row[addressIdx]) ? row[addressIdx] : "";
+
+          if (!isNaN(lat) && !isNaN(lng)) {
+            L.marker([lat, lng], { icon: shelterIcon })
+              .addTo(shelterLayerGroup)
+              .bindPopup(`<b>${name}</b><br>${address}`);
+
+            const tr = document.createElement("tr");
+            tr.innerHTML = `<td>${name}</td><td>${address}</td><td>${lat}</td><td>${lng}</td>`;
+            tableBody.appendChild(tr);
+
+            count++;
+          }
+        }
+
+        document.getElementById("csv-title").textContent = `読み込んだ避難所一覧（${CSV_FILE_NAME} : ${count}件）`;
+        document.getElementById("csv-section").style.display = "block";
+      })
+      .catch(err => {
+        console.error("CSVエラー:", err);
+        alert(err.message);
+      });
+  }
+</script>
+
+</body>
+</html>
